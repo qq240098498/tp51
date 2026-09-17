@@ -60,5 +60,59 @@
       "createdAt": "2026-09-17T02:30:00.000Z",
       "updatedAt": "2026-09-17T02:30:00.000Z"
     }
-  ]
+  ],
+  "environments": [
+    {
+      "id": "env-dev",
+      "name": "开发环境",
+      "variables": [
+        {
+          "key": "host",
+          "value": "127.0.0.1:5051"
+        },
+        {
+          "key": "token",
+          "value": "dev-token-1001"
+        }
+      ],
+      "createdAt": "2026-09-17T03:00:00.000Z",
+      "updatedAt": "2026-09-17T03:00:00.000Z"
+    },
+    {
+      "id": "env-test",
+      "name": "测试环境",
+      "variables": [
+        {
+          "key": "host",
+          "value": "test.example.com"
+        },
+        {
+          "key": "token",
+          "value": "test-token-2002"
+        }
+      ],
+      "createdAt": "2026-09-17T03:05:00.000Z",
+      "updatedAt": "2026-09-17T03:05:00.000Z"
+    },
+    {
+      "id": "env-prod",
+      "name": "生产环境",
+      "variables": [
+        {
+          "key": "host",
+          "value": "api.example.com"
+        }
+      ],
+      "createdAt": "2026-09-17T03:10:00.000Z",
+      "updatedAt": "2026-09-17T03:10:00.000Z"
+    },
+    {
+      "id": "24add868-3687-4fd8-a334-66ea743d6e8a",
+      "name": "beta环境",
+      "variables": [],
+      "createdAt": "2026-09-17T07:49:44.743Z",
+      "updatedAt": "2026-09-17T07:49:44.743Z"
+    }
+  ],
+  "activeEnvironmentId": "env-prod"
 }

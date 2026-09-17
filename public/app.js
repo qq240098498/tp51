@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  // 页面状态：用例列表、内置示例接口、请求头草稿行、最近一次响应结果与结果视图
+  // 页面状态：环境与变量、用例列表、内置示例接口、请求头草稿行、最近一次响应结果与结果视图
   const state = {
     cases: [],
     selectedId: '',
@@ -10,6 +10,8 @@
     busy: false,
     result: null,
     resultView: 'structured',
+    environments: [],
+    activeEnvironmentId: '',
   };
 
   const dom = {
@@ -21,6 +23,21 @@
     body: document.getElementById('field-body'),
     headerRows: document.getElementById('header-rows'),
     addHeader: document.getElementById('add-header'),
+    previewBox: document.getElementById('preview-box'),
+    previewSummary: document.getElementById('preview-summary'),
+    previewEnvName: document.getElementById('preview-env-name'),
+    envSelect: document.getElementById('env-select'),
+    envSummary: document.getElementById('env-summary'),
+    renameEnv: document.getElementById('rename-env'),
+    deleteEnv: document.getElementById('delete-env'),
+    newEnvName: document.getElementById('new-env-name'),
+    addEnv: document.getElementById('add-env'),
+    currentEnvTitle: document.getElementById('current-env-title'),
+    varList: document.getElementById('var-list'),
+    varSummary: document.getElementById('var-summary'),
+    newVarKey: document.getElementById('new-var-key'),
+    newVarValue: document.getElementById('new-var-value'),
+    addVar: document.getElementById('add-var'),
     demos: document.getElementById('demo-list'),
     demoSummary: document.getElementById('demo-summary'),
     sendRequest: document.getElementById('send-request'),
@@ -74,6 +91,8 @@
       const error = new Error(info.message || `操作失败（状态码 ${response.status}）`);
       error.code = info.code || 'request_failed';
       error.field = typeof info.field === 'string' ? info.field : '';
+      error.status = response.status;
+      error.details = info.details && typeof info.details === 'object' ? info.details : null;
       throw error;
     }
     return payload;
@@ -87,6 +106,14 @@
     dom.refreshCases.disabled = busy;
     dom.sendRequest.textContent = busy && activeAction === 'send' ? '发送中…' : '发送请求';
     dom.saveCase.textContent = busy && activeAction === 'save' ? '正在保存…' : '保存为用例';
+    if (dom.envSelect) dom.envSelect.disabled = busy;
+    const hasEnv = !!state.activeEnvironmentId;
+    if (dom.renameEnv) dom.renameEnv.disabled = busy || !hasEnv;
+    if (dom.deleteEnv) dom.deleteEnv.disabled = busy || !hasEnv;
+    if (dom.addVar) dom.addVar.disabled = busy || !hasEnv;
+    if (dom.newVarKey) dom.newVarKey.disabled = busy || !hasEnv;
+    if (dom.newVarValue) dom.newVarValue.disabled = busy || !hasEnv;
+    if (dom.addEnv) dom.addEnv.disabled = busy;
   }
 
   // ---------------- 页面消息与出错标记 ----------------
@@ -107,14 +134,16 @@
       node.hidden = true;
       node.textContent = '';
     });
-    [dom.name, dom.url, dom.body, dom.headerRows].forEach((node) => node.classList.remove('invalid'));
+    [dom.name, dom.url, dom.body, dom.headerRows, dom.previewBox].forEach((node) => {
+      if (node) node.classList.remove('invalid');
+    });
   }
 
   // 服务端给出的位置可能是 headers.2.key 这种形式，标记时按区块归位
   function normalizeField(field) {
     if (typeof field !== 'string' || !field) return '';
     const key = field.split('.')[0];
-    return ['name', 'method', 'url', 'headers', 'body'].includes(key) ? key : '';
+    return ['name', 'method', 'url', 'headers', 'body', 'preview'].includes(key) ? key : '';
   }
 
   function showFieldError(field, message) {
@@ -131,8 +160,28 @@
       url: dom.url,
       headers: dom.headerRows,
       body: dom.body,
+      preview: dom.previewBox,
     }[key];
     if (target) target.classList.add('invalid');
+  }
+
+  // 环境管理区有自己的错误槽位，单独处理
+  function showEnvError(slotName, message) {
+    const slot = document.querySelector(`[data-error="${slotName}"]`);
+    if (slot) {
+      slot.textContent = message;
+      slot.hidden = false;
+    }
+  }
+
+  function clearEnvErrors() {
+    ['environmentName', 'variableKey', 'variableValue'].forEach((slotName) => {
+      const slot = document.querySelector(`[data-error="${slotName}"]`);
+      if (slot) {
+        slot.hidden = true;
+        slot.textContent = '';
+      }
+    });
   }
 
   // ---------------- 请求区 ----------------
@@ -205,11 +254,744 @@
       : [{ key: '', value: '' }];
     renderHeaderRows();
     clearFieldErrors();
+    renderPreview();
   }
 
   function resetDraft(silent) {
     fillDraft({ name: '', method: 'GET', url: '', headers: [], body: '' });
     if (!silent) showNotice('草稿已清空', 'info');
+  }
+
+  // ---------------- 变量模板与替换引擎 ----------------
+
+  const VAR_NAME_RULE = /^[A-Za-z0-9_.-]+$/;
+  // 请求头名称允许的字符，与服务端保持一致
+  const HEADER_NAME_RULE = /[^!#$%&'*+\-.^_`|~0-9A-Za-z]/;
+
+  // 与服务端 scanTemplate 同一套规则：拆出普通文本、合法占位与不成立的占位
+  function scanTemplate(text) {
+    const source = typeof text === 'string' ? text : '';
+    const tokens = [];
+    const issues = [];
+    let cursor = 0;
+    let textStart = 0;
+
+    const pushLiteral = (end) => {
+      if (end > textStart) tokens.push({ type: 'text', text: source.slice(textStart, end) });
+    };
+
+    while (cursor < source.length) {
+      const open = source.indexOf('{{', cursor);
+      if (open === -1) break;
+      const close = source.indexOf('}}', open + 2);
+      if (close === -1) {
+        pushLiteral(open);
+        const raw = source.slice(open);
+        tokens.push({ type: 'broken', raw, name: '', code: 'TEMPLATE_UNCLOSED' });
+        issues.push({ code: 'TEMPLATE_UNCLOSED', name: '', raw, message: `有一处变量占位没有闭合：${raw}` });
+        textStart = source.length;
+        cursor = source.length;
+        break;
+      }
+      pushLiteral(open);
+      const raw = source.slice(open, close + 2);
+      const name = source.slice(open + 2, close).trim();
+      if (!name) {
+        tokens.push({ type: 'broken', raw, name: '', code: 'TEMPLATE_EMPTY_NAME' });
+        issues.push({ code: 'TEMPLATE_EMPTY_NAME', name: '', raw, message: `存在变量名为空的占位：${raw}` });
+      } else if (!VAR_NAME_RULE.test(name)) {
+        tokens.push({ type: 'broken', raw, name, code: 'TEMPLATE_INVALID_NAME' });
+        issues.push({ code: 'TEMPLATE_INVALID_NAME', name, raw, message: `变量名「${name}」不成立，只能使用字母、数字、下划线、中划线与点` });
+      } else {
+        tokens.push({ type: 'placeholder', raw, name });
+      }
+      textStart = close + 2;
+      cursor = close + 2;
+    }
+    pushLiteral(source.length);
+    return { tokens, issues };
+  }
+
+  function getActiveEnvironment() {
+    return state.environments.find((item) => item.id === state.activeEnvironmentId) || null;
+  }
+
+  // 把一段文本按当前环境替换成分段结果：普通文本、已替换段、未定义段、不成立段
+  function resolveText(source, varMap, hasEnv) {
+    const scanned = scanTemplate(source);
+    const segments = [];
+    const issues = [];
+    const usedKeys = [];
+
+    scanned.tokens.forEach((token) => {
+      if (token.type === 'text') {
+        segments.push({ type: 'text', text: token.text });
+        return;
+      }
+      if (token.type === 'broken') {
+        const matched = scanned.issues.find((item) => item.code === token.code && item.raw === token.raw);
+        const message = matched ? matched.message : `变量占位不成立：${token.raw}`;
+        segments.push({ type: 'error', text: token.raw, name: token.name, message });
+        issues.push({ code: token.code, name: token.name, raw: token.raw, message });
+        return;
+      }
+      const hit = varMap.get(token.name.toLowerCase());
+      if (hit) {
+        segments.push({ type: 'var', text: hit.value, name: hit.key });
+        if (!usedKeys.some((key) => key.toLowerCase() === hit.key.toLowerCase())) usedKeys.push(hit.key);
+      } else {
+        const message = hasEnv
+          ? `变量「${token.name}」没有在当前环境中定义`
+          : `当前没有选择环境，变量「${token.name}」无法取值`;
+        segments.push({ type: 'missing', text: token.raw, name: token.name, message });
+        issues.push({ code: 'VARIABLE_UNDEFINED', name: token.name, raw: token.raw, message });
+      }
+    });
+
+    return { segments, resolved: segments.map((seg) => seg.text).join(''), issues, usedKeys };
+  }
+
+  function isValidResolvedUrl(value) {
+    if (!value || /\s/.test(value)) return false;
+    if (value.startsWith('/')) return true;
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // 评估整份请求：替换三处内容，并检查变量未定义、占位不成立以及替换后内容是否成立
+  function evaluateRequest() {
+    const draft = collectDraft();
+    const env = getActiveEnvironment();
+    const varMap = new Map();
+    if (env) env.variables.forEach((row) => varMap.set(row.key.toLowerCase(), row));
+
+    const url = resolveText(draft.url, varMap, !!env);
+    const headerRows = draft.headers.map((row) => ({
+      source: row,
+      key: resolveText(row.key, varMap, !!env),
+      value: resolveText(row.value, varMap, !!env),
+    }));
+    const body = resolveText(draft.body, varMap, !!env);
+    const issues = [];
+
+    const collect = (field, location, part) => {
+      part.issues.forEach((item) => issues.push(Object.assign({}, item, { field, location })));
+    };
+    collect('url', '目标地址', url);
+    headerRows.forEach((row, index) => {
+      collect(`headers.${index}.key`, `请求头第 ${index + 1} 行名称`, row.key);
+      collect(`headers.${index}.value`, `请求头第 ${index + 1} 行取值`, row.value);
+    });
+    collect('body', '请求内容', body);
+
+    // 目标地址：占位问题已记录，这里只补充替换后的结构校验
+    if (!url.issues.length) {
+      if (!draft.url) {
+        issues.push({ field: 'url', location: '目标地址', code: 'URL_REQUIRED', name: '', message: '请填写目标地址' });
+      } else if (!isValidResolvedUrl(url.resolved)) {
+        issues.push({
+          field: 'url',
+          location: '目标地址',
+          code: 'URL_INVALID',
+          name: '',
+          message: '变量替换后的目标地址不成立，需要以 / 开头或是合法的 http、https 地址，且不能含空格',
+        });
+      }
+    }
+
+    // 请求头：跳过整行为空的草稿行，其余检查名称缺失、替换结果非法与替换后重名
+    const seenHeaderKeys = new Set();
+    headerRows.forEach((row, index) => {
+      if (!row.source.key.trim() && !row.source.value) return;
+      if (row.key.issues.length || row.value.issues.length) return;
+      const key = row.key.resolved.trim();
+      const field = `headers.${index}.key`;
+      const location = `请求头第 ${index + 1} 行名称`;
+      if (!key) {
+        issues.push({ field, location, code: 'HEADER_KEY_REQUIRED', name: '', message: `第 ${index + 1} 行请求头缺少名称` });
+        return;
+      }
+      if (HEADER_NAME_RULE.test(key)) {
+        issues.push({
+          field,
+          location,
+          code: 'HEADER_KEY_INVALID',
+          name: '',
+          message: `第 ${index + 1} 行请求头名称替换为「${key}」后含有非法字符，请检查变量取值`,
+        });
+        return;
+      }
+      const lower = key.toLowerCase();
+      if (seenHeaderKeys.has(lower)) {
+        issues.push({ field, location, code: 'HEADER_KEY_DUPLICATE', name: '', message: `替换后请求头「${key}」与前面的行重名` });
+        return;
+      }
+      seenHeaderKeys.add(lower);
+    });
+
+    // 请求内容：只在没有占位问题时检查请求方式与 JSON 结构
+    if (!body.issues.length && draft.body.trim()) {
+      if (body.resolved.trim() && (draft.method === 'GET' || draft.method === 'HEAD')) {
+        issues.push({
+          field: 'body',
+          location: '请求内容',
+          code: 'BODY_NOT_ALLOWED',
+          name: '',
+          message: `请求方式为 ${draft.method} 时不带请求内容，变量替换后仍有内容，请清空或更换请求方式`,
+        });
+      } else {
+        const contentTypeRow = headerRows.find(
+          (row) => !row.key.issues.length && row.key.resolved.trim().toLowerCase() === 'content-type'
+        );
+        if (contentTypeRow && contentTypeRow.value.resolved.toLowerCase().includes('json') && body.resolved.trim()) {
+          try {
+            JSON.parse(body.resolved);
+          } catch (err) {
+            const used = body.usedKeys.length ? `（涉及变量：${body.usedKeys.join('、')}）` : '';
+            issues.push({
+              field: 'body',
+              location: '请求内容',
+              code: 'BODY_INVALID_JSON',
+              name: body.usedKeys.join('、'),
+              message: `变量替换后的请求内容不是合法的 JSON${used}：${err.message}`,
+            });
+          }
+        }
+      }
+    }
+
+    // 汇总本次实际发生的替换，供预览区给出对照表
+    const substitutions = [];
+    const rememberSubs = (part) => {
+      part.segments.forEach((seg) => {
+        if (seg.type !== 'var') return;
+        if (!substitutions.some((item) => item.name.toLowerCase() === seg.name.toLowerCase())) {
+          substitutions.push({ name: seg.name, value: seg.text });
+        }
+      });
+    };
+    rememberSubs(url);
+    headerRows.forEach((row) => {
+      rememberSubs(row.key);
+      rememberSubs(row.value);
+    });
+    rememberSubs(body);
+
+    return {
+      env,
+      draft,
+      url,
+      headerRows,
+      body,
+      issues,
+      substitutions,
+      canSend: issues.length === 0,
+    };
+  }
+
+  // 保存用例前只检查占位语法本身：未定义变量允许保存（别的环境里可能有定义）
+  function findTemplateSyntaxIssues() {
+    const draft = collectDraft();
+    const issues = [];
+    const check = (field, location, text) => {
+      scanTemplate(text).issues.forEach((item) => issues.push(Object.assign({}, item, { field, location })));
+    };
+    check('url', '目标地址', draft.url);
+    draft.headers.forEach((row, index) => {
+      check(`headers.${index}.key`, `请求头第 ${index + 1} 行名称`, row.key);
+      check(`headers.${index}.value`, `请求头第 ${index + 1} 行取值`, row.value);
+    });
+    check('body', '请求内容', draft.body);
+    return issues;
+  }
+
+  // ---------------- 替换预览 ----------------
+
+  function buildSegmentNodes(segments) {
+    const fragment = document.createDocumentFragment();
+    segments.forEach((seg) => {
+      if (seg.type === 'text' && seg.text === '') return;
+      const node = document.createElement('span');
+      if (seg.type === 'text') {
+        node.className = 'seg seg-text';
+        node.textContent = seg.text === '' ? ' ' : seg.text;
+      } else if (seg.type === 'var') {
+        node.className = 'seg seg-var';
+        node.textContent = seg.text;
+        node.title = `这一段由变量「${seg.name}」替换而来，取值即当前看到的内容`;
+      } else if (seg.type === 'missing') {
+        node.className = 'seg seg-missing';
+        node.textContent = seg.text;
+        node.title = seg.message;
+      } else {
+        node.className = 'seg seg-broken';
+        node.textContent = seg.text;
+        node.title = seg.message;
+      }
+      fragment.appendChild(node);
+    });
+    return fragment;
+  }
+
+  function buildPreviewRow(label, segments, resolved, rowIssues) {
+    const row = document.createElement('div');
+    row.className = 'preview-row';
+    if (rowIssues.length) row.classList.add('has-error');
+
+    const labelNode = document.createElement('span');
+    labelNode.className = 'preview-label';
+    labelNode.textContent = label;
+    row.appendChild(labelNode);
+
+    const content = document.createElement('div');
+    content.className = 'preview-content';
+    if (resolved === '') {
+      const empty = document.createElement('span');
+      empty.className = 'preview-empty';
+      empty.textContent = '（空）';
+      content.appendChild(empty);
+    } else {
+      content.appendChild(buildSegmentNodes(segments));
+    }
+    row.appendChild(content);
+
+    rowIssues.forEach((item) => {
+      const note = document.createElement('p');
+      note.className = 'preview-issue';
+      note.textContent = item.message;
+      row.appendChild(note);
+    });
+    return row;
+  }
+
+  function renderPreview() {
+    const evaluation = evaluateRequest();
+    dom.previewEnvName.textContent = evaluation.env ? evaluation.env.name : '未选择环境';
+    dom.previewBox.textContent = '';
+    dom.previewBox.classList.toggle('invalid', !evaluation.canSend);
+
+    // 预览顶部给出替换处数或问题处数，发送拦截结论也在这里体现
+    if (evaluation.canSend) {
+      dom.previewSummary.textContent = evaluation.substitutions.length
+        ? `已按当前环境替换 ${evaluation.substitutions.length} 处变量，可以发送`
+        : '当前请求没有引用变量，可以发送';
+      dom.previewSummary.className = 'counter preview-ok';
+    } else {
+      dom.previewSummary.textContent = `有 ${evaluation.issues.length} 处不成立，本次发送会被拦截`;
+      dom.previewSummary.className = 'counter preview-bad';
+    }
+
+    if (evaluation.substitutions.length) {
+      const legend = document.createElement('div');
+      legend.className = 'preview-legend';
+      evaluation.substitutions.forEach((item) => {
+        const chip = document.createElement('span');
+        chip.className = 'sub-chip';
+        const name = document.createElement('code');
+        name.className = 'sub-name';
+        name.textContent = item.name;
+        const arrow = document.createElement('span');
+        arrow.className = 'sub-arrow';
+        arrow.textContent = '→';
+        const value = document.createElement('code');
+        value.className = 'sub-value';
+        value.textContent = item.value === '' ? '（空字符串）' : item.value;
+        chip.append(name, arrow, value);
+        legend.appendChild(chip);
+      });
+      dom.previewBox.appendChild(legend);
+    }
+
+    dom.previewBox.appendChild(buildPreviewRow('目标地址', evaluation.url.segments, evaluation.url.resolved,
+      evaluation.issues.filter((item) => item.field === 'url')));
+
+    const headerBlock = document.createElement('div');
+    headerBlock.className = 'preview-headers';
+    const visibleRows = evaluation.headerRows.filter((row) => row.source.key.trim() || row.source.value);
+    if (!visibleRows.length) {
+      const empty = document.createElement('p');
+      empty.className = 'preview-emptyline';
+      empty.textContent = '请求头：暂无内容';
+      headerBlock.appendChild(empty);
+    } else {
+      evaluation.headerRows.forEach((row, index) => {
+        if (!row.source.key.trim() && !row.source.value) return;
+        const segments = [];
+        row.key.segments.forEach((seg) => segments.push(seg));
+        segments.push({ type: 'text', text: ': ' });
+        row.value.segments.forEach((seg) => segments.push(seg));
+        const resolved = `${row.key.resolved}: ${row.value.resolved}`;
+        const rowIssues = evaluation.issues.filter(
+          (item) => item.field === `headers.${index}.key` || item.field === `headers.${index}.value`
+        );
+        headerBlock.appendChild(buildPreviewRow(`请求头第 ${index + 1} 行`, segments, resolved, rowIssues));
+      });
+    }
+    dom.previewBox.appendChild(headerBlock);
+
+    dom.previewBox.appendChild(buildPreviewRow('请求内容', evaluation.body.segments, evaluation.body.resolved,
+      evaluation.issues.filter((item) => item.field === 'body')));
+
+    return evaluation;
+  }
+
+  // 发送或保存被拦截时，把问题按区块塞回请求区的错误槽位，并指出变量名
+  function surfaceIssues(issues) {
+    const byField = new Map();
+    issues.forEach((item) => {
+      const key = normalizeField(item.field);
+      if (!key) return;
+      if (!byField.has(key)) byField.set(key, []);
+      byField.get(key).push(item.message);
+    });
+    byField.forEach((messages, key) => {
+      showFieldError(key, Array.from(new Set(messages)).join('；'));
+    });
+  }
+
+  // ---------------- 环境管理 ----------------
+
+  async function loadEnvironments() {
+    try {
+      const data = await request('/api/environments');
+      state.environments = Array.isArray(data.environments) ? data.environments : [];
+      state.activeEnvironmentId = data.activeEnvironmentId || '';
+    } catch (err) {
+      state.environments = [];
+      state.activeEnvironmentId = '';
+      showNotice(`环境数据读取失败：${err.message}`, 'error');
+    }
+    renderEnvironmentSelect();
+    renderVariableList();
+    renderPreview();
+  }
+
+  function renderEnvironmentSelect() {
+    dom.envSelect.textContent = '';
+    if (!state.environments.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = '暂无环境，请先新增';
+      dom.envSelect.appendChild(option);
+      dom.envSelect.value = '';
+      dom.envSummary.textContent = '共 0 套环境';
+      dom.currentEnvTitle.textContent = '未选择环境';
+      dom.varSummary.textContent = '共 0 条';
+      dom.renameEnv.disabled = true;
+      dom.deleteEnv.disabled = true;
+      dom.addVar.disabled = true;
+      dom.newVarKey.disabled = true;
+      dom.newVarValue.disabled = true;
+      return;
+    }
+
+    state.environments.forEach((env) => {
+      const option = document.createElement('option');
+      option.value = env.id;
+      option.textContent = `${env.name}（${env.variables.length} 个变量）`;
+      dom.envSelect.appendChild(option);
+    });
+    dom.envSelect.value = state.activeEnvironmentId;
+    dom.envSummary.textContent = `共 ${state.environments.length} 套环境`;
+    dom.renameEnv.disabled = false;
+    dom.deleteEnv.disabled = false;
+    dom.addVar.disabled = false;
+    dom.newVarKey.disabled = false;
+    dom.newVarValue.disabled = false;
+    const current = getActiveEnvironment();
+    dom.currentEnvTitle.textContent = current ? current.name : '未选择环境';
+    dom.varSummary.textContent = current ? `共 ${current.variables.length} 条` : '共 0 条';
+  }
+
+  function renderVariableList() {
+    const env = getActiveEnvironment();
+    dom.varList.textContent = '';
+    if (!env) {
+      const hint = document.createElement('p');
+      hint.className = 'rows-empty';
+      hint.textContent = '还没有可选环境，先在上方新增一套环境，再逐条添加变量。';
+      dom.varList.appendChild(hint);
+      return;
+    }
+    if (!env.variables.length) {
+      const hint = document.createElement('p');
+      hint.className = 'rows-empty';
+      hint.textContent = '这套环境还没有变量，在下方逐条添加，例如变量名 host、取值 127.0.0.1:5051。';
+      dom.varList.appendChild(hint);
+      return;
+    }
+
+    env.variables.forEach((row, index) => {
+      const line = document.createElement('div');
+      line.className = 'var-row';
+
+      const order = document.createElement('span');
+      order.className = 'var-order';
+      order.textContent = String(index + 1);
+
+      const key = document.createElement('code');
+      key.className = 'var-key';
+      key.textContent = row.key;
+      key.title = '变量名（变量名不可直接修改，可删除后重新添加）';
+
+      const valueInput = document.createElement('input');
+      valueInput.type = 'text';
+      valueInput.className = 'var-value-input';
+      valueInput.value = row.value;
+      valueInput.autocomplete = 'off';
+      valueInput.placeholder = '变量取值';
+      valueInput.dataset.key = row.key;
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn btn-ghost btn-small btn-danger';
+      remove.textContent = '删除';
+      remove.dataset.action = 'remove-var';
+      remove.dataset.key = row.key;
+
+      line.append(order, key, valueInput, remove);
+      dom.varList.appendChild(line);
+    });
+  }
+
+  // 在本地状态里改某条变量取值，保证输入时预览就能实时变化；落盘由 change 事件负责
+  function patchLocalVariable(key, value) {
+    const env = getActiveEnvironment();
+    if (!env) return;
+    const row = env.variables.find((item) => item.key.toLowerCase() === key.toLowerCase());
+    if (row) row.value = value;
+    renderPreview();
+  }
+
+  async function persistVariableValue(key, value) {
+    const env = getActiveEnvironment();
+    if (!env) return;
+    try {
+      const data = await request(
+        `/api/environments/${encodeURIComponent(env.id)}/variables/${encodeURIComponent(key)}`,
+        { method: 'PUT', body: { value } }
+      );
+      const updated = state.environments.find((item) => item.id === env.id);
+      if (updated && data.environment) {
+        updated.variables = data.environment.variables;
+        updated.updatedAt = data.environment.updatedAt;
+      }
+      renderEnvironmentSelect();
+      renderPreview();
+    } catch (err) {
+      showNotice(`变量「${key}」取值保存失败：${err.message}，已恢复为服务端内容`, 'error');
+      await loadEnvironments();
+    }
+  }
+
+  async function switchEnvironment(id) {
+    if (state.busy || !id || id === state.activeEnvironmentId) return;
+    setBusy(true);
+    try {
+      await request(`/api/environments/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+      state.activeEnvironmentId = id;
+      const env = getActiveEnvironment();
+      renderEnvironmentSelect();
+      renderVariableList();
+      renderPreview();
+      showNotice(`当前生效环境已切换为「${env ? env.name : ''}」，预览已按新环境的取值更新`, 'success');
+    } catch (err) {
+      showNotice(err.message, 'error');
+      dom.envSelect.value = state.activeEnvironmentId;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createEnvironment() {
+    if (state.busy) return;
+    clearEnvErrors();
+    const name = dom.newEnvName.value.trim();
+    if (!name) {
+      showEnvError('environmentName', '环境名称不能为空');
+      dom.newEnvName.focus();
+      return;
+    }
+    setBusy(true);
+    try {
+      const data = await request('/api/environments', { method: 'POST', body: { name } });
+      state.environments.push(data.environment);
+      state.activeEnvironmentId = data.activeEnvironmentId;
+      dom.newEnvName.value = '';
+      renderEnvironmentSelect();
+      renderVariableList();
+      renderPreview();
+      showNotice(`已新增环境「${data.environment.name}」并切换为当前生效环境`, 'success');
+      dom.newVarKey.focus();
+    } catch (err) {
+      if (err.field === 'environmentName') showEnvError('environmentName', err.message);
+      showNotice(err.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renameCurrentEnvironment() {
+    if (state.busy) return;
+    const env = getActiveEnvironment();
+    if (!env) return;
+    clearEnvErrors();
+    const name = window.prompt('把当前环境重命名为：', env.name);
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      showEnvError('environmentName', '环境名称不能为空');
+      return;
+    }
+    if (trimmed === env.name) return;
+    setBusy(true);
+    try {
+      const data = await request(`/api/environments/${encodeURIComponent(env.id)}`, {
+        method: 'PATCH',
+        body: { name: trimmed },
+      });
+      env.name = data.environment.name;
+      env.updatedAt = data.environment.updatedAt;
+      renderEnvironmentSelect();
+      renderPreview();
+      showNotice(`环境已重命名为「${data.environment.name}」`, 'success');
+    } catch (err) {
+      if (err.field === 'environmentName') showEnvError('environmentName', err.message);
+      showNotice(err.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteCurrentEnvironment() {
+    if (state.busy) return;
+    const env = getActiveEnvironment();
+    if (!env) return;
+    const confirmed = window.confirm(
+      `确认删除环境「${env.name}」？该环境下的 ${env.variables.length} 条变量会一并删除，其他环境不受影响，删除后无法恢复。`
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const data = await request(`/api/environments/${encodeURIComponent(env.id)}`, { method: 'DELETE' });
+      state.environments = state.environments.filter((item) => item.id !== env.id);
+      state.activeEnvironmentId = data.activeEnvironmentId;
+      renderEnvironmentSelect();
+      renderVariableList();
+      renderPreview();
+      showNotice(`环境「${data.name}」已删除${data.activeEnvironmentId ? '，已自动切换到剩余环境' : '，目前没有可用环境'}`, 'success');
+    } catch (err) {
+      showNotice(err.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addVariable() {
+    if (state.busy) return;
+    clearEnvErrors();
+    const env = getActiveEnvironment();
+    if (!env) {
+      showNotice('请先新增并选择一套环境，再添加变量', 'error');
+      return;
+    }
+    const key = dom.newVarKey.value.trim();
+    const value = dom.newVarValue.value;
+    // 变量名为空当场拒绝，并指明这是待添加的第几条
+    if (!key) {
+      showEnvError('variableKey', `第 ${env.variables.length + 1} 条变量不成立：变量名不能为空`);
+      dom.newVarKey.focus();
+      return;
+    }
+    if (!VAR_NAME_RULE.test(key)) {
+      showEnvError('variableKey', `第 ${env.variables.length + 1} 条变量不成立：变量名「${key}」只能使用字母、数字、下划线、中划线与点`);
+      dom.newVarKey.focus();
+      return;
+    }
+    const localDuplicate = env.variables.findIndex((row) => row.key.toLowerCase() === key.toLowerCase());
+    if (localDuplicate !== -1) {
+      showEnvError('variableKey', `第 ${env.variables.length + 1} 条变量不成立：第 ${localDuplicate + 1} 条已经叫「${key}」，同一环境下变量名不能重复`);
+      dom.newVarKey.focus();
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const data = await request(`/api/environments/${encodeURIComponent(env.id)}/variables`, {
+        method: 'POST',
+        body: { key, value },
+      });
+      env.variables = data.environment.variables;
+      env.updatedAt = data.environment.updatedAt;
+      dom.newVarKey.value = '';
+      dom.newVarValue.value = '';
+      renderEnvironmentSelect();
+      renderVariableList();
+      renderPreview();
+      showNotice(`已向环境「${env.name}」添加第 ${data.index + 1} 条变量「${key}」`, 'success');
+      dom.newVarKey.focus();
+    } catch (err) {
+      // 服务端返回的重名结论里已经写明是第几条，直接展示
+      if (err.field === 'variableKey') showEnvError('variableKey', err.message);
+      showNotice(err.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeVariable(key) {
+    if (state.busy) return;
+    const env = getActiveEnvironment();
+    if (!env) return;
+
+    const doDelete = async (force) => {
+      const suffix = force ? '?force=true' : '';
+      return request(
+        `/api/environments/${encodeURIComponent(env.id)}/variables/${encodeURIComponent(key)}${suffix}`,
+        { method: 'DELETE' }
+      );
+    };
+
+    setBusy(true);
+    try {
+      let result;
+      try {
+        result = await doDelete(false);
+      } catch (err) {
+        if (err.status !== 409 || err.code !== 'VARIABLE_STILL_REFERENCED') throw err;
+        // 变量仍被其他环境引用：给出明确结论，由用户决定是否只删当前环境这一条
+        const referenced = (err.details && Array.isArray(err.details.referencedBy)) ? err.details.referencedBy : [];
+        const names = referenced.map((item) => item.name).join('、');
+        const confirmed = window.confirm(
+          `变量「${key}」仍被其他环境引用：${names}。\n\n` +
+          `点击「确定」只删除当前环境「${env.name}」中的这一条，其他环境里的同名变量保持不变；点击「取消」则保留不删。`
+        );
+        if (!confirmed) {
+          showNotice(`已保留变量「${key}」，其他环境仍在引用它`, 'info');
+          return;
+        }
+        result = await doDelete(true);
+      }
+
+      env.variables = env.variables.filter((row) => row.key.toLowerCase() === key.toLowerCase());
+      renderEnvironmentSelect();
+      renderVariableList();
+      renderPreview();
+      if (result.stillReferencedBy && result.stillReferencedBy.length) {
+        const names = result.stillReferencedBy.map((item) => item.name).join('、');
+        showNotice(`已从当前环境「${env.name}」删除变量「${key}」；其他环境（${names}）里的同名变量保持不变`, 'success');
+      } else {
+        showNotice(`已删除变量「${key}」，没有其他环境再引用同名变量`, 'success');
+      }
+    } catch (err) {
+      showNotice(err.message, 'error');
+    } finally {
+      setBusy(false);
+    }
   }
 
   // ---------------- 内置示例接口 ----------------
@@ -282,23 +1064,33 @@
     if (state.busy) return;
     clearFieldErrors();
 
-    const draft = collectDraft();
-    if (!draft.url) {
-      showFieldError('url', '请填写目标地址');
-      showNotice('请填写目标地址', 'error');
-      dom.url.focus();
-      return;
-    }
-    if (draft.body.trim() && (draft.method === 'GET' || draft.method === 'HEAD')) {
-      showFieldError('body', `请求方式为 ${draft.method} 时不带请求内容，请清空请求内容或更换请求方式`);
-      showNotice('请求方式与请求内容不匹配，请调整后再发送', 'error');
+    // 先按当前环境替换并检查：变量未定义、占位不成立、替换后地址或 JSON 不成立都会被拦下
+    const evaluation = evaluateRequest();
+    renderPreview();
+    if (!evaluation.canSend) {
+      surfaceIssues(evaluation.issues);
+      const first = evaluation.issues[0];
+      showNotice(`本次发送已被拦截：${first.location ? `${first.location}：` : ''}${first.message}`, 'error');
+      const focusTarget = { url: dom.url, body: dom.body, headers: dom.headerRows }[normalizeField(first.field)];
+      if (focusTarget) focusTarget.focus();
       return;
     }
 
+    // 真正发出去的是替换后的实际内容，模板原文只保留在页面与用例里
+    const resolved = {
+      name: dom.name.value.trim(),
+      method: evaluation.draft.method,
+      url: evaluation.url.resolved,
+      headers: evaluation.headerRows
+        .filter((row) => row.source.key.trim() || row.source.value)
+        .map((row) => ({ key: row.key.resolved.trim(), value: row.value.resolved })),
+      body: evaluation.body.resolved,
+    };
+
     setBusy(true, 'send');
-    renderResultPending(draft);
+    renderResultPending(resolved);
     try {
-      const result = await request('/api/send', { method: 'POST', body: draft });
+      const result = await request('/api/send', { method: 'POST', body: resolved });
       state.result = result;
       renderResult(result);
       if (result.ok) {
@@ -775,6 +1567,14 @@
       dom.url.focus();
       return;
     }
+    // 保存的是带占位的模板：允许引用其他环境里才有的变量，但空变量名、非法变量名、未闭合等语法问题当场拒绝
+    const syntaxIssues = findTemplateSyntaxIssues();
+    if (syntaxIssues.length) {
+      surfaceIssues(syntaxIssues);
+      const first = syntaxIssues[0];
+      showNotice(`用例没有保存：${first.location}：${first.message}`, 'error');
+      return;
+    }
 
     setBusy(true, 'save');
     try {
@@ -782,7 +1582,7 @@
       state.selectedId = created.id;
       await loadCases();
       renderDetail(created);
-      showNotice(`用例「${created.name}」已保存，请求区内容保留可直接发送`, 'success');
+      showNotice(`用例「${created.name}」已保存，请求区的变量占位原样保留`, 'success');
     } catch (err) {
       if (err.field) showFieldError(err.field, err.message);
       showNotice(err.message, 'error');
@@ -913,6 +1713,11 @@
   // ---------------- 事件绑定与入口 ----------------
 
   function bindEvents() {
+    // 请求区任意一处改动都实时重算替换预览
+    dom.url.addEventListener('input', () => renderPreview());
+    dom.body.addEventListener('input', () => renderPreview());
+    dom.method.addEventListener('change', () => renderPreview());
+
     dom.headerRows.addEventListener('input', (event) => {
       const target = event.target;
       const index = Number(target.dataset ? target.dataset.index : NaN);
@@ -922,6 +1727,7 @@
       const slot = document.querySelector('[data-error="headers"]');
       if (slot) slot.hidden = true;
       dom.headerRows.classList.remove('invalid');
+      renderPreview();
     });
 
     dom.headerRows.addEventListener('click', (event) => {
@@ -931,6 +1737,7 @@
       if (!Number.isInteger(index) || !state.headers[index]) return;
       state.headers.splice(index, 1);
       renderHeaderRows();
+      renderPreview();
     });
 
     dom.addHeader.addEventListener('click', () => {
@@ -939,6 +1746,54 @@
       const inputs = dom.headerRows.querySelectorAll('input');
       const last = inputs[inputs.length - 2];
       if (last) last.focus();
+    });
+
+    // ---------- 环境管理 ----------
+    dom.envSelect.addEventListener('change', () => {
+      switchEnvironment(dom.envSelect.value);
+    });
+
+    dom.addEnv.addEventListener('click', createEnvironment);
+    dom.newEnvName.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') createEnvironment();
+    });
+    dom.renameEnv.addEventListener('click', renameCurrentEnvironment);
+    dom.deleteEnv.addEventListener('click', deleteCurrentEnvironment);
+
+    dom.addVar.addEventListener('click', addVariable);
+    dom.newVarValue.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') addVariable();
+    });
+    dom.newVarKey.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') dom.newVarValue.focus();
+    });
+
+    // 变量取值：输入过程中本地实时替换，失焦或回车时落盘；删除按引用情况分别处理
+    dom.varList.addEventListener('input', (event) => {
+      const target = event.target;
+      if (!target.classList || !target.classList.contains('var-value-input')) return;
+      patchLocalVariable(target.dataset.key, target.value);
+    });
+
+    dom.varList.addEventListener('change', (event) => {
+      const target = event.target;
+      if (!target.classList || !target.classList.contains('var-value-input')) return;
+      persistVariableValue(target.dataset.key, target.value);
+    });
+
+    dom.varList.addEventListener('keydown', (event) => {
+      const target = event.target;
+      if (!target.classList || !target.classList.contains('var-value-input')) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        target.blur();
+      }
+    });
+
+    dom.varList.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action="remove-var"]');
+      if (!button) return;
+      removeVariable(button.dataset.key);
     });
 
     dom.sendRequest.addEventListener('click', sendRequest);
@@ -980,6 +1835,11 @@
     renderCases();
     await checkHealth();
     await loadDemos();
+    try {
+      await loadEnvironments();
+    } catch (err) {
+      showNotice(err.message, 'error');
+    }
     try {
       await loadCases();
     } catch (err) {

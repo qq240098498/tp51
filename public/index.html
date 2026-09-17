@@ -48,7 +48,7 @@
           <div class="field field-url">
             <label for="field-url">目标地址</label>
             <input id="field-url" type="text" autocomplete="off" spellcheck="false" />
-            <p class="field-hint">以 / 开头表示本机内置示例接口，例如 /demo/echo；也可以填写 http 或 https 开头的完整地址</p>
+            <p class="field-hint">以 / 开头表示本机内置示例接口，例如 /demo/echo；也可以填写 http 或 https 开头的完整地址；可写成 {{变量名}} 引用当前环境变量</p>
             <p class="field-error" data-error="url" hidden></p>
           </div>
         </div>
@@ -69,14 +69,25 @@
             <button type="button" class="btn btn-ghost btn-small" id="add-header">添加请求头</button>
           </div>
           <div class="header-rows" id="header-rows"></div>
+          <p class="field-hint">请求头名称与取值都可以写成 {{变量名}}；整行留空会被忽略</p>
           <p class="field-error" data-error="headers" hidden></p>
         </div>
 
         <div class="field">
           <label for="field-body">请求内容</label>
           <textarea id="field-body" rows="7" spellcheck="false"></textarea>
-          <p class="field-hint">请求方式为 GET 或 HEAD 时不带请求内容，其余方式会按填写的内容原样发出去</p>
+          <p class="field-hint">请求方式为 GET 或 HEAD 时不带请求内容，其余方式会按填写的内容原样发出去；可写成 {{变量名}} 引用当前环境变量</p>
           <p class="field-error" data-error="body" hidden></p>
+        </div>
+
+        <div class="field">
+          <div class="field-head">
+            <label>实际内容预览（当前环境：<span id="preview-env-name">未选择</span>）</label>
+            <span class="counter" id="preview-summary"></span>
+          </div>
+          <p class="field-hint" id="preview-hint">把请求区里的 {{变量名}} 按当前环境的取值替换后的实际内容；带底色的片段表示该处发生了替换。变量未定义或替换后内容不成立时，这里会标红指出，且本次不允许发送。</p>
+          <div class="preview-box" id="preview-box"></div>
+          <p class="field-error" data-error="preview" hidden></p>
         </div>
 
         <div class="actions">
@@ -99,6 +110,48 @@
     </div>
 
     <div class="column">
+      <section class="panel" id="env-panel">
+        <div class="panel-head">
+          <h2>环境管理</h2>
+          <span class="counter" id="env-summary"></span>
+        </div>
+
+        <div class="field">
+          <label for="env-select">当前生效环境</label>
+          <div class="env-switch-row">
+            <select id="env-select"></select>
+            <button type="button" class="btn btn-small" id="rename-env">重命名</button>
+            <button type="button" class="btn btn-small btn-danger" id="delete-env">删除环境</button>
+          </div>
+          <p class="field-error" data-error="environmentName" hidden></p>
+        </div>
+
+        <div class="field">
+          <div class="field-head">
+            <label>新增环境</label>
+          </div>
+          <div class="env-add-row">
+            <input id="new-env-name" type="text" maxlength="40" autocomplete="off" placeholder="输入新环境名称，例如：预发环境" />
+            <button type="button" class="btn btn-small btn-primary" id="add-env">新增环境</button>
+          </div>
+        </div>
+
+        <div class="field env-vars-field">
+          <div class="field-head">
+            <label>「<span id="current-env-title">未选择环境</span>」的变量</label>
+            <span class="counter" id="var-summary">共 0 条</span>
+          </div>
+          <div class="var-list" id="var-list"></div>
+          <div class="var-add-row">
+            <input id="new-var-key" type="text" maxlength="64" autocomplete="off" placeholder="变量名" />
+            <input id="new-var-value" type="text" maxlength="4096" autocomplete="off" placeholder="变量取值" />
+            <button type="button" class="btn btn-small btn-primary" id="add-var">添加变量</button>
+          </div>
+          <p class="field-error" data-error="variableKey" hidden></p>
+          <p class="field-error" data-error="variableValue" hidden></p>
+        </div>
+      </section>
+
       <section class="panel" id="case-panel">
         <div class="panel-head">
           <h2>用例区</h2>

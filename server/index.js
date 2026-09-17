@@ -1,6 +1,7 @@
 const path = require('path');
 const express = require('express');
 const api = require('./api');
+const envApi = require('./environments');
 const target = require('./target');
 const demos = require('./demo-routes');
 
@@ -63,6 +64,67 @@ app.delete('/api/cases/:id', (req, res) => {
   }
 });
 
+// 多环境与变量：环境的新增、重命名、切换、删除，以及环境下变量的增删改
+app.get('/api/environments', (_req, res) => {
+  res.json(envApi.listEnvironments());
+});
+
+app.post('/api/environments', (req, res) => {
+  try {
+    res.status(201).json(envApi.createEnvironment(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.patch('/api/environments/:id', (req, res) => {
+  try {
+    res.json(envApi.renameEnvironment(req.params.id, req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/environments/:id/activate', (req, res) => {
+  try {
+    res.json(envApi.activateEnvironment(req.params.id));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.delete('/api/environments/:id', (req, res) => {
+  try {
+    res.json(envApi.deleteEnvironment(req.params.id));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/environments/:id/variables', (req, res) => {
+  try {
+    res.status(201).json(envApi.addVariable(req.params.id, req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.put('/api/environments/:id/variables/:key', (req, res) => {
+  try {
+    res.json(envApi.updateVariableValue(req.params.id, req.params.key, req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.delete('/api/environments/:id/variables/:key', (req, res) => {
+  try {
+    res.json(envApi.deleteVariable(req.params.id, req.params.key, { force: req.query.force === 'true' }));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 // 内置示例接口，供页面在不填外部地址的情况下试出发送效果
 demos.mount(app);
 
@@ -75,7 +137,12 @@ app.use('/api', (_req, res) => {
 function sendError(res, err) {
   if (err instanceof api.ApiError) {
     return res.status(err.status).json({
-      error: { code: err.code, message: err.message, field: err.field },
+      error: {
+        code: err.code,
+        message: err.message,
+        field: err.field,
+        ...(err.details ? { details: err.details } : {}),
+      },
     });
   }
   console.error('[tp51] 处理请求时出现未预期的问题：', err);
