@@ -60,5 +60,36 @@
       "createdAt": "2026-09-17T02:30:00.000Z",
       "updatedAt": "2026-09-17T02:30:00.000Z"
     }
-  ]
+  ],
+  "environments": [
+    {
+      "id": "env-dev",
+      "name": "开发环境",
+      "variables": [
+        {
+          "key": "host",
+          "value": "127.0.0.1:5051"
+        },
+        {
+          "key": "token",
+          "value": "dev-token-1001"
+        }
+      ]
+    },
+    {
+      "id": "env-prod",
+      "name": "生产环境",
+      "variables": [
+        {
+          "key": "host",
+          "value": "api.example.com"
+        },
+        {
+          "key": "token",
+          "value": "prod-token-9f2c7b"
+        }
+      ]
+    }
+  ],
+  "activeEnvironmentId": "env-prod"
 }

@@ -48,7 +48,7 @@
           <div class="field field-url">
             <label for="field-url">目标地址</label>
             <input id="field-url" type="text" autocomplete="off" spellcheck="false" />
-            <p class="field-hint">以 / 开头表示本机内置示例接口，例如 /demo/echo；也可以填写 http 或 https 开头的完整地址</p>
+            <p class="field-hint">以 / 开头表示本机内置示例接口，例如 /demo/echo；也可以填写 http 或 https 开头的完整地址。可写 {{变量名}} 引用当前环境的变量</p>
             <p class="field-error" data-error="url" hidden></p>
           </div>
         </div>
@@ -96,9 +96,39 @@
         </div>
         <div id="result-body"></div>
       </section>
+
+      <section class="panel" id="preview-panel">
+        <div class="panel-head">
+          <h2>实际内容预览</h2>
+          <span class="panel-tag" id="preview-env-tag">未选择环境</span>
+        </div>
+        <p class="field-hint" style="margin-top:0;">按当前生效环境替换 {{变量名}} 之后真正会发出去的内容，高亮段标出每一处替换与取值；存在未定义变量或替换后内容不成立时，发送会被拦下。</p>
+        <div id="preview-body"></div>
+      </section>
     </div>
 
     <div class="column">
+      <section class="panel" id="env-panel">
+        <div class="panel-head">
+          <h2>环境管理</h2>
+          <div class="panel-head-right">
+            <span class="counter" id="env-summary"></span>
+            <button type="button" class="btn btn-ghost btn-small" id="add-env">新增环境</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-head">
+            <label for="env-select">当前生效环境</label>
+            <span class="counter" id="active-env-hint"></span>
+          </div>
+          <select id="env-select"></select>
+          <p class="field-hint">请求区里的 {{变量名}} 都按当前生效环境的取值替换，切换环境后预览会立即刷新</p>
+        </div>
+
+        <div class="env-editor" id="env-editor"></div>
+      </section>
+
       <section class="panel" id="case-panel">
         <div class="panel-head">
           <h2>用例区</h2>

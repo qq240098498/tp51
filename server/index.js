@@ -1,6 +1,7 @@
 const path = require('path');
 const express = require('express');
 const api = require('./api');
+const envApi = require('./environments');
 const target = require('./target');
 const demos = require('./demo-routes');
 
@@ -23,16 +24,62 @@ app.get('/api/demos', (_req, res) => {
   res.json({ endpoints: demos.listEndpoints() });
 });
 
-// 发送请求：先按保存用例的同一套规则校验草稿，再真正发出去并回传结果
+// 发送请求：先按当前环境替换变量并严格校验，再真正发出去并回传结果
 app.post('/api/send', async (req, res) => {
   let draft = null;
   try {
-    draft = api.normalizeRequestDraft(req.body);
+    draft = api.resolveDraftForSend(req.body);
   } catch (err) {
     return sendError(res, err);
   }
   const result = await target.sendOutgoing(draft, PORT);
   return res.json(result);
+});
+
+// ---- 多环境与变量 ----
+
+app.get('/api/environments', (_req, res) => {
+  res.json(envApi.listEnvironments());
+});
+
+app.post('/api/environments', (req, res) => {
+  try {
+    res.status(201).json(envApi.createEnvironment(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.patch('/api/environments/:id/name', (req, res) => {
+  try {
+    res.json(envApi.renameEnvironment(req.params.id, req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.delete('/api/environments/:id', (req, res) => {
+  try {
+    res.json(envApi.deleteEnvironment(req.params.id));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.put('/api/environments/:id/active', (req, res) => {
+  try {
+    res.json(envApi.activateEnvironment(req.params.id));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.put('/api/environments/:id/variables', (req, res) => {
+  try {
+    res.json(envApi.saveVariables(req.params.id, req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
 });
 
 app.get('/api/cases', (_req, res) => {
@@ -73,7 +120,7 @@ app.use('/api', (_req, res) => {
 
 // 统一错误出口：业务异常按状态码与错误码返回，其余按服务异常处理
 function sendError(res, err) {
-  if (err instanceof api.ApiError) {
+  if (err instanceof api.ApiError || err instanceof envApi.EnvError) {
     return res.status(err.status).json({
       error: { code: err.code, message: err.message, field: err.field },
     });

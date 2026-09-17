@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { load, save } = require('./store');
+const { renderText, isValidVariableName } = require('./template');
 
 // 允许的请求方式，与页面上的下拉选项保持一致
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
@@ -67,38 +68,10 @@ function validateUrl(url) {
   return value;
 }
 
-// 请求头逐行校验：名称必填、字符合法、同名不重复
-function validateHeaders(headers) {
-  if (headers === undefined || headers === null) return [];
-  if (!Array.isArray(headers)) {
-    throw new ApiError(400, 'HEADERS_INVALID', '请求头需要按行列表填写', 'headers');
-  }
-  if (headers.length > MAX_HEADER_COUNT) {
-    throw new ApiError(400, 'HEADERS_TOO_MANY', `请求头最多 ${MAX_HEADER_COUNT} 行`, 'headers');
-  }
-  const list = [];
-  const seen = new Set();
-  headers.forEach((row, index) => {
-    const key = pickText(row && row.key);
-    const value = typeof (row && row.value) === 'string' ? row.value : '';
-    if (!key && !value) return; // 整行为空的直接跳过
-    if (!key) {
-      throw new ApiError(400, 'HEADER_KEY_REQUIRED', `第 ${index + 1} 行请求头缺少名称`, `headers.${index}.key`);
-    }
-    if (/[^!#$%&'*+\-.^_`|~0-9A-Za-z]/.test(key)) {
-      throw new ApiError(400, 'HEADER_KEY_INVALID', `请求头名称「${key}」含有非法字符`, `headers.${index}.key`);
-    }
-    const lower = key.toLowerCase();
-    if (seen.has(lower)) {
-      throw new ApiError(400, 'HEADER_KEY_DUPLICATE', `请求头「${key}」重复填写`, `headers.${index}.key`);
-    }
-    seen.add(lower);
-    list.push({ key, value });
-  });
-  return list;
-}
+// ---- 模板阶段（保存用例时）：只做最基本的非空与长度限制，占位符原样保留 ----
+// 含 {{变量名}} 的内容此刻既不是合法地址也不是合法 JSON，真正成立与否要等替换之后再判
 
-// 请求内容按请求方式与内容类型校验：GET 与 HEAD 不允许带内容，JSON 内容必须能解析
+// 替换后的请求内容校验：GET 与 HEAD 不允许带内容，声明为 JSON 时必须能解析
 function validateBody(body, method, headers) {
   const value = typeof body === 'string' ? body : '';
   if (value.length > MAX_BODY_LENGTH) {
@@ -114,10 +87,81 @@ function validateBody(body, method, headers) {
     try {
       JSON.parse(value);
     } catch (err) {
-      throw new ApiError(400, 'BODY_INVALID_JSON', `请求内容不是合法的 JSON：${err.message}`, 'body');
+      throw new ApiError(400, 'BODY_INVALID_JSON', `请求内容替换变量后不是合法的 JSON：${err.message}`, 'body');
     }
   }
   return value;
+}
+
+function validateTemplateUrl(url) {
+  const value = pickText(url);
+  if (!value) throw new ApiError(400, 'URL_REQUIRED', '目标地址不能为空', 'url');
+  if (value.length > MAX_URL_LENGTH) {
+    throw new ApiError(400, 'URL_TOO_LONG', `目标地址不能超过 ${MAX_URL_LENGTH} 个字符`, 'url');
+  }
+  return value;
+}
+
+function validateTemplateHeaders(headers) {
+  if (headers === undefined || headers === null) return [];
+  if (!Array.isArray(headers)) {
+    throw new ApiError(400, 'HEADERS_INVALID', '请求头需要按行列表填写', 'headers');
+  }
+  if (headers.length > MAX_HEADER_COUNT) {
+    throw new ApiError(400, 'HEADERS_TOO_MANY', `请求头最多 ${MAX_HEADER_COUNT} 行`, 'headers');
+  }
+  return headers
+    .map((row) => ({
+      key: typeof (row && row.key) === 'string' ? row.key.trim() : '',
+      value: typeof (row && row.value) === 'string' ? row.value : '',
+    }))
+    .filter((row) => row.key || row.value);
+}
+
+function validateTemplateBody(body) {
+  const value = typeof body === 'string' ? body : '';
+  if (value.length > MAX_BODY_LENGTH) {
+    throw new ApiError(400, 'BODY_TOO_LONG', `请求内容不能超过 ${MAX_BODY_LENGTH} 个字符`, 'body');
+  }
+  return value;
+}
+
+// 位置描述与字段定位：变量出问题时要能指出是哪一处、哪个变量
+function describeLocation(part, index) {
+  if (part === 'url') return { where: '目标地址', field: 'url' };
+  if (part === 'body') return { where: '请求内容', field: 'body' };
+  if (part === 'header-key') return { where: `第 ${index + 1} 行请求头的名称`, field: `headers.${index}.key` };
+  return { where: `第 ${index + 1} 行请求头的取值`, field: `headers.${index}.value` };
+}
+
+function assertTokenErrors(part, tokens, index, envName) {
+  tokens.forEach((token) => {
+    const loc = describeLocation(part, index);
+    if (!token.name) {
+      throw new ApiError(
+        400,
+        'VAR_NAME_EMPTY',
+        `${loc.where}里有一个没有写名字的变量（形如 {{}}），请补上变量名`,
+        loc.field
+      );
+    }
+    if (!isValidVariableName(token.name)) {
+      throw new ApiError(
+        400,
+        'VAR_NAME_INVALID',
+        `${loc.where}里的变量名「${token.name}」不成立：变量名需以字母或下划线开头，只能包含字母、数字、下划线与中划线`,
+        loc.field
+      );
+    }
+    if (!token.defined) {
+      throw new ApiError(
+        400,
+        'VAR_NOT_DEFINED',
+        `${loc.where}引用的变量「${token.name}」在当前环境「${envName}」中没有定义，请先在环境管理区添加，或切换到定义了它的环境`,
+        loc.field
+      );
+    }
+  });
 }
 
 // 读取用例列表，按创建时间从新到旧排列，顺序稳定
@@ -138,14 +182,64 @@ function getCase(id) {
   return found;
 }
 
-// 请求草稿的公共校验：保存用例与实际发送都走这一套，保证两边判断一致
+// 用例草稿的公共校验：保存用例走这一套，{{变量名}} 占位符按模板原样保留
 function normalizeRequestDraft(payload) {
   const input = payload && typeof payload === 'object' ? payload : {};
   const method = validateMethod(input.method);
-  const url = validateUrl(input.url);
-  const headers = validateHeaders(input.headers);
-  const body = validateBody(input.body, method, headers);
+  const url = validateTemplateUrl(input.url);
+  const headers = validateTemplateHeaders(input.headers);
+  const body = validateTemplateBody(input.body);
   return { method, url, headers, body };
+}
+
+// 发送前解析：按指定环境把目标地址、请求头名称与取值、请求内容里的变量全部替换，
+// 再按与保存一致的严格规则校验替换结果。任何一处不成立都抛错，这一次请求不会发出去
+function resolveDraftForSend(payload) {
+  const input = payload && typeof payload === 'object' ? payload : {};
+  const method = validateMethod(input.method);
+  const rawUrl = validateTemplateUrl(input.url);
+  const rawHeaders = validateTemplateHeaders(input.headers);
+  const rawBody = validateTemplateBody(input.body);
+
+  const data = load();
+  const envId = typeof input.environmentId === 'string' ? input.environmentId : data.activeEnvironmentId;
+  const env = data.environments.find((item) => item.id === envId) || null;
+  const envName = env ? env.name : '';
+  const variables = env ? env.variables : [];
+
+  const urlRender = renderText(rawUrl, variables);
+  assertTokenErrors('url', urlRender.tokens, -1, envName);
+  const url = validateUrl(urlRender.text);
+
+  const headers = [];
+  const seenHeader = new Set();
+  rawHeaders.forEach((row, index) => {
+    const keyRender = renderText(row.key, variables);
+    const valueRender = renderText(row.value, variables);
+    assertTokenErrors('header-key', keyRender.tokens, index, envName);
+    assertTokenErrors('header-value', valueRender.tokens, index, envName);
+    const key = keyRender.text.trim();
+    const value = valueRender.text;
+    if (!key && !value) return;
+    if (!key) {
+      throw new ApiError(400, 'HEADER_KEY_REQUIRED', `第 ${index + 1} 行请求头替换变量后名称为空，请补充变量取值或改写模板`, `headers.${index}.key`);
+    }
+    if (/[^!#$%&'*+\-.^_`|~0-9A-Za-z]/.test(key)) {
+      throw new ApiError(400, 'HEADER_KEY_INVALID', `第 ${index + 1} 行请求头名称「${key}」替换变量后含有非法字符`, `headers.${index}.key`);
+    }
+    const lower = key.toLowerCase();
+    if (seenHeader.has(lower)) {
+      throw new ApiError(400, 'HEADER_KEY_DUPLICATE', `第 ${index + 1} 行请求头「${key}」替换变量后与其他行重名`, `headers.${index}.key`);
+    }
+    seenHeader.add(lower);
+    headers.push({ key, value });
+  });
+
+  const bodyRender = renderText(rawBody, variables);
+  assertTokenErrors('body', bodyRender.tokens, -1, envName);
+  const body = validateBody(bodyRender.text, method, headers);
+
+  return { method, url, headers, body, environmentId: env ? env.id : '', environmentName: envName };
 }
 
 function createCase(payload) {
@@ -183,6 +277,7 @@ module.exports = {
   ApiError,
   ALLOWED_METHODS,
   normalizeRequestDraft,
+  resolveDraftForSend,
   listCases,
   getCase,
   createCase,
